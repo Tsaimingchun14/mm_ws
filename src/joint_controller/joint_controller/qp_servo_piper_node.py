@@ -34,7 +34,7 @@ class QPServoNode(Node):
         )
         self.arm_joint_state_sub = self.create_subscription(
             JointState,
-            'joint_states',
+            'joint_states_feedback',
             self.arm_joint_state_cb,
             qos_profile
         )
