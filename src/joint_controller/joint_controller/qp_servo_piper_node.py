@@ -44,7 +44,7 @@ class QPServoNode(Node):
             self.target_pose_cb,
             qos_profile
         )
-        self.arm_pos_cmd_pub = self.create_publisher(Float64MultiArray, 'joint_commands', 10)
+        self.arm_pos_cmd_pub = self.create_publisher(JointState, 'joint_commands', 10)
         self.timer = self.create_timer(self.DT, self.control_loop)
 
         self.current_arm_joint_position = None
@@ -121,7 +121,7 @@ class QPServoNode(Node):
         # Integrate velocity to position using fixed dt
         q_new = q + qd * self.INTEGRATION_DT
         self.q_calc = q_new.copy()
-        self.cmd_arm(qd)
+        self.cmd_arm(q_new)
         #TODO stop sending commands when close enough to target
     
     # def cmd_base(self, v, w):
@@ -130,18 +130,13 @@ class QPServoNode(Node):
     #       twist.angular.z = w
     #       self.base_vel_cmd_pub.publish(twist)
     
-    def cmd_arm(self, qds):
-          msg = Float64MultiArray()
-          assert len(qds) == 6, "Expected 6 joint commands for the arm."
-          msg.data = [float(p) + float(q) * self.DT for p, q in zip(self.current_arm_joint_position, qds)] # integrate velocity to position TODO check joint limits
-          dim = MultiArrayDimension()
-          dim.label = "positions"
-          dim.size = 6
-          dim.stride = 6  
-
-          msg.layout.dim = [dim]
-          msg.layout.data_offset = 0
-          self.arm_pos_cmd_pub.publish(msg)
+    def cmd_arm(self, q):
+        msg = JointState()
+        assert len(q) == 6, "Expected 6 joint commands for the arm."
+        msg.name = self.ARM_JOINT_NAMES
+        msg.position = q
+        msg.header.stamp = self.get_clock().now().to_msg()
+        self.arm_pos_cmd_pub.publish(msg)
 
 def main(args=None):
     rclpy.init(args=args)
