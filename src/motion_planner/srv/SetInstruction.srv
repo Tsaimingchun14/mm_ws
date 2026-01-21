@@ -1,0 +1,7 @@
+string text_prompt
+sensor_msgs/Image image
+float32[] bbox
+geometry_msgs/Pose object_position_prompt
+---
+bool success
+string message
