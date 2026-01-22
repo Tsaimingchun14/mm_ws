@@ -7,14 +7,11 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseStamped
 import numpy as np
 from spatialmath import SE3, UnitQuaternion
 import roboticstoolbox as rtb
 import qpsolvers as qp
-from time import time, sleep
-import matplotlib.pyplot as plt
-import threading
 
 class QPServoNode(Node):
     ARM_JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
@@ -63,15 +60,11 @@ class QPServoNode(Node):
         
         self.debug = True  
         if self.debug:
-            self.q_calc_hist = []
-            self.q_meas_hist = []
-            self.ee_calc_hist = []
-            self.ee_meas_hist = []
-            self.time_hist = []
-            self.start_time = time()
-            self._plot_thread = threading.Thread(target=self.live_plot, daemon=True)
-            self._plot_thread.start()
-
+            self.q_calc_pub = self.create_publisher(JointState, '/debug/q_calc', 10)
+            self.q_meas_pub = self.create_publisher(JointState, '/debug/q_meas', 10)
+            self.ee_calc_pub = self.create_publisher(PoseStamped, '/debug/ee_calc', 10)
+            self.ee_meas_pub = self.create_publisher(PoseStamped, '/debug/ee_meas', 10)
+            
     def arm_joint_state_cb(self, msg):
         self.current_arm_joint_position = msg.position
         # Initialize q_calc with measured q if not set
@@ -142,13 +135,9 @@ class QPServoNode(Node):
         self.q_calc = q + qd * self.INTEGRATION_DT
         self.cmd_arm(self.q_calc.tolist())
         
-        if self.debug:
-            self.q_calc_hist.append(q.tolist())
-            self.q_meas_hist.append(self.current_arm_joint_position[:6])
-            self.ee_calc_hist.append(wTe.t.tolist() + UnitQuaternion(wTe).vec.tolist())
-            self.ee_meas_hist.append(self.ee_pose)
-            self.time_hist.append(time() - self.start_time)
-            
+        if self.debug: 
+            self.pub_debug_msg(q, wTe)
+                    
     
     def cmd_arm(self, q):
         msg = JointState()
@@ -157,56 +146,44 @@ class QPServoNode(Node):
         msg.position = q
         msg.header.stamp = self.get_clock().now().to_msg()
         self.arm_pos_cmd_pub.publish(msg)
-    
-    def live_plot(self):
+        
+    def pub_debug_msg(self, q, wTe):
+        q_calc_msg = JointState()
+        q_calc_msg.name = self.ARM_JOINT_NAMES
+        q_calc_msg.position = q.tolist()
+        q_calc_msg.header.stamp = self.get_clock().now().to_msg()
+        self.q_calc_pub.publish(q_calc_msg)
 
-        plt.ion()
-        fig, axs = plt.subplots(2, 2, figsize=(14, 8))
-        ax_q_calc = axs[0, 0]
-        ax_q_meas = axs[0, 1]
-        ax_ee_calc = axs[1, 0]
-        ax_ee_meas = axs[1, 1]
-        # Joint angles: 6 lines, labeled as joint0 ... joint5
-        lines_q_calc = [ax_q_calc.plot([], [], label=f'joint{i}')[0] for i in range(6)]
-        lines_q_meas = [ax_q_meas.plot([], [], label=f'joint{i}')[0] for i in range(6)]
-        # EE pose: 7 lines, labeled as x, y, z, qw, qx, qy, qz
-        ee_labels = ['x', 'y', 'z', 'qw', 'qx', 'qy', 'qz']
-        lines_ee_calc = [ax_ee_calc.plot([], [], label=lbl)[0] for lbl in ee_labels]
-        lines_ee_meas = [ax_ee_meas.plot([], [], label=lbl)[0] for lbl in ee_labels]
-        ax_q_calc.set_title('q_calc (joint angles)')
-        ax_q_meas.set_title('q_meas (joint angles)')
-        ax_ee_calc.set_title('ee_calc (pose)')
-        ax_ee_meas.set_title('ee_meas (pose)')
-        for ax in axs.flat:
-            ax.set_xlabel('Time (s)')
-        ax_q_calc.set_ylabel('Joint Value (rad)')
-        ax_q_meas.set_ylabel('Joint Value (rad)')
-        ax_ee_calc.set_ylabel('Pose Component')
-        ax_ee_meas.set_ylabel('Pose Component')
-        ax_q_calc.legend()
-        ax_q_meas.legend()
-        ax_ee_calc.legend()
-        ax_ee_meas.legend()
-        while True:
-            if len(self.q_calc_hist) == 0 or len(self.q_meas_hist) == 0 or len(self.ee_calc_hist) == 0 or len(self.ee_meas_hist) == 0:
-                sleep(0.05)
-                continue
-            t = self.time_hist
-            q_calc = np.array(self.q_calc_hist)
-            q_meas = np.array(self.q_meas_hist)
-            ee_calc = np.array(self.ee_calc_hist)
-            ee_meas = np.array(self.ee_meas_hist)
-            for i in range(6):
-                lines_q_calc[i].set_data(t, q_calc[:, i])
-                lines_q_meas[i].set_data(t, q_meas[:, i])
-            for i in range(7):
-                lines_ee_calc[i].set_data(t, ee_calc[:, i])
-                lines_ee_meas[i].set_data(t, ee_meas[:, i])
-            for ax in axs.flat:
-                ax.relim()
-                ax.autoscale_view()
-            plt.pause(0.05)
-            sleep(0.05)
+        q_meas_msg = JointState()
+        q_meas_msg.name = self.ARM_JOINT_NAMES
+        q_meas_msg.position = self.current_arm_joint_position[:6]
+        q_meas_msg.header.stamp = self.get_clock().now().to_msg()
+        self.q_meas_pub.publish(q_meas_msg)
+
+        ee_calc_msg = PoseStamped()
+        ee_calc_msg.header.stamp = self.get_clock().now().to_msg()
+        pos = wTe.t
+        quat = UnitQuaternion(wTe).vec
+        ee_calc_msg.pose.position.x = pos[0]
+        ee_calc_msg.pose.position.y = pos[1]
+        ee_calc_msg.pose.position.z = pos[2]
+        ee_calc_msg.pose.orientation.w = quat[0]
+        ee_calc_msg.pose.orientation.x = quat[1]
+        ee_calc_msg.pose.orientation.y = quat[2]
+        ee_calc_msg.pose.orientation.z = quat[3]
+        self.ee_calc_pub.publish(ee_calc_msg)
+
+        if self.ee_pose is not None:
+            ee_meas_msg = PoseStamped()
+            ee_meas_msg.header.stamp = self.get_clock().now().to_msg()
+            ee_meas_msg.pose.position.x = self.ee_pose[0]
+            ee_meas_msg.pose.position.y = self.ee_pose[1]
+            ee_meas_msg.pose.position.z = self.ee_pose[2]
+            ee_meas_msg.pose.orientation.w = self.ee_pose[3]
+            ee_meas_msg.pose.orientation.x = self.ee_pose[4]
+            ee_meas_msg.pose.orientation.y = self.ee_pose[5]
+            ee_meas_msg.pose.orientation.z = self.ee_pose[6]
+            self.ee_meas_pub.publish(ee_meas_msg)
 
 def main(args=None):
     rclpy.init(args=args)
