@@ -1,91 +1,149 @@
 import rclpy
 from rclpy.node import Node
-from motion_planner.srv import SetInstruction
+from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
+from std_msgs.msg import String
 from geometry_msgs.msg import Pose
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, JointState
+from std_msgs.msg import Int32
 import message_filters
 import numpy as np
 from cv_bridge import CvBridge
 from .perception.perception import PerceptionModel
+from .action_types import parse_action
+import json
+import roboticstoolbox as rtb
+from .controller_status import JointControllerStatus
 
 class MotionPlannerNode(Node):
+        
     DT = 1/10.0
 
     def __init__(self):
         super().__init__('motion_planner_node')
         self.ee_pose_pub = self.create_publisher(Pose, 'target_ee_pose', 10)
-        self.instruction_srv = self.create_service(SetInstruction, 'set_instruction', self.instruction_srv_cb)
-        self.timer = self.create_timer(self.DT, self.control_loop)
-        self.current_goal = dict()
-        self.current_goal["text_prompt"] = None
-        self.current_goal["visual_prompt"] = {"image": None, "bbox": None}
-        self.active = False
-
-        # 使用 message_filters 同步 image_raw 與 depth_image
+        self.task_sub = self.create_subscription(String, 'motion_task', self._task_cb, 10)
+        self.timer = self.create_timer(self.DT, self._control_loop)
+        self.current_task = None  
+        
         self.latest_image = None
         self.latest_depth = None
-        self.latest_depth_info = None
+        self.intrinsics = None
         self.image_sub = message_filters.Subscriber(self, Image, 'image_raw')
         self.depth_sub = message_filters.Subscriber(self, Image, 'depth_image')
-        self.depth_info_sub = message_filters.Subscriber(
-            self, CameraInfo, "depth_info", qos_profile=self.depth_info_qos_profile
-        )
+        self.depth_info_sub = message_filters.Subscriber( self, CameraInfo, "depth_info")
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.image_sub, self.depth_sub, self.depth_info_sub], queue_size=10, slop=0.1)
-        self.ts.registerCallback(self.synced_image_cb)
+        self.ts.registerCallback(self._synced_image_cb)
 
-        # mock camera-to-base transform (4x4 numpy array)
-        self.camera_to_base = np.array([
-            [1, 0, 0, 0.5],
-            [0, 1, 0, 0.0],
-            [0, 0, 1, 1.0],
-            [0, 0, 0, 1]
-        ])
         self.bridge = CvBridge()
         self.perception_model = PerceptionModel()
+        
+        qos_profile = QoSProfile(
+            depth=1,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.VOLATILE
+        )
+        self.arm_joint_state_sub = self.create_subscription(
+            JointState,
+            'joint_states_feedback',
+            self._arm_joint_state_cb,
+            qos_profile
+        )
+        self.joint_controller_status_sub = self.create_subscription(
+            Int32, 
+            'joint_controller_status', 
+            self._jc_status_cb,
+            qos_profile
+        )
+        self.joint_controller_status = JointControllerStatus.WORKING
+        self.robot = rtb.models.KachakaPiper()
+        self.current_base_joint_position = [0, 0]
+        self.current_arm_joint_position = None
 
-    def instruction_srv_cb(self, request, response):
-        self.current_goal["text_prompt"] = request.text_prompt or None
-        if request.image.data and request.bbox:
-            self.current_goal["visual_prompt"] = {"image": request.image, "bbox": list(request.bbox)}
-        else:
-            self.current_goal["visual_prompt"] = None
-        self.active = any([
-            self.current_goal["text_prompt"],
-            self.current_goal["visual_prompt"],
-        ])
-        response.success = True
-        response.message = "Instruction updated."
-        self.get_logger().info(f"SetInstruction: text={self.current_goal['text_prompt']}, \
-            visual_prompt exist={self.current_goal['visual_prompt'] is not None}")
-        return response
+    def _task_cb(self, msg):
+        d = json.loads(msg.data)
+        action_obj = parse_action(d)
+        self.current_task = action_obj
+        self.get_logger().info(f"Received task: {action_obj}")
 
-    def control_loop(self):
-        if not self.active:
+    def _control_loop(self):
+        if self.current_task is None:
+            return
+
+        if self.latest_image is None or self.latest_depth is None or self.intrinsics is None:
             return
         
-        target_pose = Pose()
-        visual_prompt = self.current_goal.get("visual_prompt")
-        text_prompt = self.current_goal.get("text_prompt")
-        grasp_center = None
-        if visual_prompt and self.latest_image:
-            grasp_center = self.perception_model.inference(self.latest_image, ref_img=visual_prompt["image"], bbox=visual_prompt["bbox"])
-        elif text_prompt and self.latest_image:
-            grasp_center = self.perception_model.inference(self.latest_image, tp=text_prompt)
-     
-        if grasp_center is not None:
-            grasp_center_h = np.array([*grasp_center, 1.0])  # homogeneous
-            grasp_center_base = self.camera_to_base @ grasp_center_h
-            target_pose.position.x = grasp_center_base[0]
-            target_pose.position.y = grasp_center_base[1]
-            target_pose.position.z = grasp_center_base[2]
-            #TODO set orientation (fixed for now)
-            self.ee_pose_pub.publish(target_pose)
+        self.current_task.step(self)
+        
+        if self.current_task.is_completed():
+            self.get_logger().info(f"Action {self.current_task.action} completed.")
+            self.current_task = None
+        elif self.current_task.failed():
+            self.get_logger().error(f"Action {self.current_task.action} failed.")
+            self.current_task = None
 
-    def synced_image_cb(self, img_msg, depth_msg, depth_info_msg):
+    def _synced_image_cb(self, img_msg, depth_msg, depth_info_msg):
         self.latest_image = self.bridge.imgmsg_to_cv2(img_msg)
         self.latest_depth = self.bridge.imgmsg_to_cv2(depth_msg)
-        self.latest_depth_info = depth_info_msg
+        self.intrinsics = {
+            'fx': depth_info_msg.k[0],
+            'fy': depth_info_msg.k[4],
+            'cx': depth_info_msg.k[2],
+            'cy': depth_info_msg.k[5],
+        }
+        
+    def _arm_joint_state_cb(self, msg):
+        self.current_arm_joint_position = msg.position
+        
+    def _jc_status_cb(self, msg):
+        self.joint_controller_status = JointControllerStatus(msg.data)
+        
+    def publish_ee_pose(self, pose_list):
+        """
+        pose_list: [x, y, z, qw, qx, qy, qz]
+        """
+        if not isinstance(pose_list, (list, tuple)) or len(pose_list) != 7:
+            self.get_logger().error("publish_ee_pose expects a list of 7 elements: [x, y, z, qw, qx, qy, qz]")
+            return
+        pose_msg = Pose()
+        pose_msg.position.x = pose_list[0]
+        pose_msg.position.y = pose_list[1]
+        pose_msg.position.z = pose_list[2]
+        pose_msg.orientation.w = pose_list[3]
+        pose_msg.orientation.x = pose_list[4]
+        pose_msg.orientation.y = pose_list[5]
+        pose_msg.orientation.z = pose_list[6]
+        self.ee_pose_pub.publish(pose_msg)
+        
+    def get_object_center_3d_camera(self):
+        mask = self.perception_model.process_frame(self.latest_image)
+        center_3d = self.perception_model.calculate_object_center_3d(mask, self.latest_depth, self.intrinsics)
+        return center_3d
+    
+    def convert_camera_to_base(self, point_camera):
+        """
+        point_camera: [x, y, z] in camera frame
+        """
+        camera_in_ee = np.array([
+            [1, 0, 0, 0.05],
+            [0, 1, 0, 0.0],
+            [0, 0, 1, 0.10],
+            [0, 0, 0, 1]
+        ])
+        if self.current_arm_joint_position is None:
+            self.get_logger().error("No arm joint state for FK")
+            return None
+        q = np.zeros(self.robot.n)
+        q[:2] = self.current_base_joint_position
+        q[2:8] = self.current_arm_joint_position[:6]
+        ee_in_base = self.robot.fkine(q, include_base=False).A
+        p_cam = np.array([point_camera[0], point_camera[1], point_camera[2], 1.0])
+        p_base = ee_in_base @ camera_in_ee @ p_cam
+        return p_base[:3]
+    
+    def update_perception_prompt(self, point_prompt):
+        self.perception_model.update_point_prompt(self.latest_image, point_prompt)
 
 def main(args=None):
     rclpy.init(args=args)

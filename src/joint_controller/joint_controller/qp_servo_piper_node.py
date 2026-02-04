@@ -8,11 +8,18 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSHistoryPolicy, QoSReliabilityPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import Pose, PoseStamped
+from std_msgs.msg import Int32
 import numpy as np
 from spatialmath import SE3, UnitQuaternion
 import roboticstoolbox as rtb
 import qpsolvers as qp
+from enum import Enum
 
+class JointControllerStatus(Enum):
+    FAIL = -1
+    WORKING = 0
+    IDLE = 1
+    
 class QPServoNode(Node):
     ARM_JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
     DT = 1/40.0  
@@ -49,6 +56,8 @@ class QPServoNode(Node):
         )
         self.arm_pos_cmd_pub = self.create_publisher(JointState, 'joint_commands', 10)
         self.timer = self.create_timer(self.DT, self.control_loop)
+        
+        self.status_pub = self.create_publisher(Int32, 'joint_controller_status', 10)
 
         self.current_arm_joint_position = None
         self.target_pose = None
@@ -57,6 +66,7 @@ class QPServoNode(Node):
         self.robot = rtb.models.Piper()  # Use arm-only model
         self.q_calc = None  
         self.target_reached = False
+        self.status = JointControllerStatus.IDLE
         
         self.debug = True  
         if self.debug:
@@ -72,7 +82,6 @@ class QPServoNode(Node):
             self.q_calc = np.array(self.current_arm_joint_position[:6])
 
     def target_pose_cb(self, msg):
-
         self.target_pose = [msg.position.x, msg.position.y, msg.position.z , msg.orientation.w, msg.orientation.x, msg.orientation.y, msg.orientation.z]
         
     def ee_pose_cb(self, msg):
@@ -82,19 +91,24 @@ class QPServoNode(Node):
         
         if self.target_pose is None:
             print("No target pose received yet")
-            return
+            self.status = JointControllerStatus.IDLE
+            self.publish_status()
+            return 
         if self.current_arm_joint_position is None:
             print("No joint state received yet")
+            self.status = JointControllerStatus.FAIL
+            self.publish_status()
             return
-        
+       
         # Use calculated q if available, else initialize with measured q
         if self.q_calc is None:
             q = np.array(self.current_arm_joint_position[:6])
             self.q_calc = q.copy()
         else:
             q = self.q_calc
+            
         self.robot.q = q
-        wTe = self.robot.fkine(q)
+        wTe = self.robot.fkine(self.robot.q)
         Tep = SE3.Rt(UnitQuaternion(self.target_pose[3:]).SO3(), self.target_pose[:3]).A
         eTep = np.linalg.inv(wTe.A) @ Tep
         et = np.sum(np.abs(eTep[:3, -1]))
@@ -103,15 +117,20 @@ class QPServoNode(Node):
             self.q_calc = np.array(self.current_arm_joint_position[:6])
             if not self.target_reached:
                 self.target_reached = True
+            self.status = JointControllerStatus.IDLE
+            self.publish_status()
             return
         self.target_reached = False
+        self.status = JointControllerStatus.WORKING
+        self.publish_status()
+        
         Y = 0.01
         Q = np.eye(self.robot.n + 6)
         Q[:self.robot.n, :self.robot.n] *= Y
         Q[self.robot.n:, self.robot.n:] = (1.0 / et) * np.eye(6)
         v, _ = rtb.p_servo(wTe, Tep, 1.5)
         v[3:] *= 0.5
-        Aeq = np.c_[self.robot.jacobe(q), np.eye(6)]
+        Aeq = np.c_[self.robot.jacobe(self.robot.q), np.eye(6)]
         beq = v.reshape((6,))
         Ain = np.zeros((self.robot.n + 6, self.robot.n + 6))
         bin = np.zeros(self.robot.n + 6)
@@ -119,12 +138,14 @@ class QPServoNode(Node):
         pi = 0.9
         Ain[:self.robot.n, :self.robot.n], bin[:self.robot.n] = self.robot.joint_velocity_damper(ps, pi, self.robot.n)
         c = np.concatenate((np.zeros(self.robot.n), np.zeros(6)))
+        
+        # The lower and upper bounds on the joint velocity and slack variable
         lb = -np.r_[self.robot.qdlim[:self.robot.n], 10 * np.ones(6)]
         ub = np.r_[self.robot.qdlim[:self.robot.n], 10 * np.ones(6)]
+        
         qd = qp.solve_qp(Q, c, Ain, bin, Aeq, beq, lb=lb, ub=ub, solver='quadprog')
         if qd is None:
-            self.get_logger().warn('QP solver failed, sending zero commands')
-            self.cmd_arm([0]*6)
+            self.get_logger().warn('QP solver failed, not sending commands')
             return
         qd = qd[:self.robot.n]
         if et > 0.5:
@@ -146,6 +167,11 @@ class QPServoNode(Node):
         msg.position = q
         msg.header.stamp = self.get_clock().now().to_msg()
         self.arm_pos_cmd_pub.publish(msg)
+        
+    def publish_status(self):
+        msg = Int32()
+        msg.data = self.status.value
+        self.status_pub.publish(msg)
         
     def pub_debug_msg(self, q, wTe):
         q_calc_msg = JointState()
