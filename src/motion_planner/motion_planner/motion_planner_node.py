@@ -57,8 +57,9 @@ class MotionPlannerNode(Node):
             qos_profile
         )
         self.joint_controller_status = JointControllerStatus.WORKING
-        self.robot = rtb.models.KachakaPiper()
-        self.current_base_joint_position = [0, 0]
+        # self.robot = rtb.models.KachakaPiper()
+        # self.current_base_joint_position = [0, 0]
+        self.robot = rtb.models.Piper()
         self.current_arm_joint_position = None
 
     def _task_cb(self, msg):
@@ -135,8 +136,9 @@ class MotionPlannerNode(Node):
             self.get_logger().error("No arm joint state for FK")
             return None
         q = np.zeros(self.robot.n)
-        q[:2] = self.current_base_joint_position
-        q[2:8] = self.current_arm_joint_position[:6]
+        # q[:2] = self.current_base_joint_position
+        # q[2:8] = self.current_arm_joint_position[:6]
+        q = self.current_arm_joint_position[:6]
         ee_in_base = self.robot.fkine(q, include_base=False).A
         p_cam = np.array([point_camera[0], point_camera[1], point_camera[2], 1.0])
         p_base = ee_in_base @ camera_in_ee @ p_cam
