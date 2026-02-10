@@ -62,9 +62,6 @@ spatialmath-python==1.1.15
 swift-sim==1.1.0
 sympy==1.13.1
 tokenizers==0.22.2
-torch==2.5.1+cu121
-torchaudio==2.5.1+cu121
-torchvision==0.20.1+cu121
 tqdm==4.67.3
 transformers==5.1.0
 triton==3.1.0
@@ -72,3 +69,4 @@ typer-slim==0.21.1
 typing-extensions==4.15.0
 virtualenv==20.36.1
 websockets==16.0
+huggingface-hub==1.4.1

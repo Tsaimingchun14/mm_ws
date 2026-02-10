@@ -73,6 +73,13 @@ class PerceptionModel:
 
 if __name__ == "__main__":
 
+    import torch
+    print("CUDA available:", torch.cuda.is_available())
+    print("CUDA devices:", torch.cuda.device_count())
+    print("Current device:", torch.cuda.current_device())
+    print("Device name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "None")
+
+
     import cv2
     import sys
     import time
@@ -91,6 +98,8 @@ if __name__ == "__main__":
     first_frame_rgb = cv2.cvtColor(first_frame_bgr, cv2.COLOR_BGR2RGB)
 
     perception = PerceptionModel(device="cuda")
+    print(next(perception.model.parameters()).device)
+    
     dummy_point = [[753, 831]]  # (x, y) inside your object — adjust as needed
     perception.update_point_prompt(first_frame_rgb, dummy_point)
 

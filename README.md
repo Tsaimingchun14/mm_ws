@@ -4,7 +4,10 @@
 ```
 uv venv --python 3.10
 source .venv/bin/activate
-uv pip sync requirements.txt
+uv pip sync requirements.txt --cache-dir {CACHE_DIR} 
+uv pip install torch==2.5.1+cu121 torchvision==0.20.1+cu121 torchaudio==2.5.1+cu121 --index-url https://download.pytorch.org/whl/cu121 
+#optional
+export HF_HOME={CACHE_DIR}
 ```
 
 ## Joint controller
