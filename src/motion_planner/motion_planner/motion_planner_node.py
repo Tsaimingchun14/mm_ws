@@ -127,11 +127,12 @@ class MotionPlannerNode(Node):
         point_camera: [x, y, z] in camera frame
         """
         camera_in_ee = np.array([
-            [1, 0, 0, 0.05],
-            [0, 1, 0, 0.0],
-            [0, 0, 1, 0.10],
-            [0, 0, 0, 1]
+            [ 0.12045728,  0.99241666,  0.02447911, -0.07102005],
+            [-0.99265611,  0.12068956, -0.0082389,   0.02413094],
+            [-0.0111308,  -0.0233069,   0.99966639, -0.09727718],
+            [ 0.,          0.,          0.,          1.        ]
         ])
+        
         if self.current_arm_joint_position is None:
             self.get_logger().error("No arm joint state for FK")
             return None

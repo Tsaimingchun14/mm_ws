@@ -24,6 +24,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            "motion_planner_node = motion_planner.motion_planner_node:main"
         ],
     },
 )
